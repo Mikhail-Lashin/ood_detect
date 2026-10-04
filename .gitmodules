@@ -1,0 +1,3 @@
+[submodule "libs/anomalib"]
+	path = libs/anomalib
+	url = https://github.com/open-edge-platform/anomalib.git
