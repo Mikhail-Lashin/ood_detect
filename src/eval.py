@@ -78,7 +78,6 @@ def main(
     model_path: Annotated[Path, arg(aliases=["-m"])],
     anomaly_threshold: Annotated[float | None, arg(aliases=["-t"])] = None,
     visualizations: Annotated[bool, arg(aliases=["-v"])] = True,
-    results: Annotated[bool, arg(aliases=["-r"])] = True,
     device: str = "CPU",
 ):
     """Evaluate model on labeled test data.
@@ -134,11 +133,10 @@ def main(
     metrics.save_metadata(run_dir / "metadata.json", meta)
     
     # save results
-    if results:
-        results_file = run_dir / "results.json"
-        with open(results_file, "w", encoding="utf-8") as f:
-            json.dump(records, f, indent=2, ensure_ascii=False)
-        print(f">>> Detailed results saved to: {results_file}")
+    results_file = run_dir / "results.json"
+    with open(results_file, "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2, ensure_ascii=False)
+    print(f">>> Detailed results saved to: {results_file}")
     
 
 
