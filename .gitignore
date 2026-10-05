@@ -3,3 +3,6 @@ datasets/
 results/
 __pycache__/
 openvino_cache/
+*.png
+scripts/vis_depth.py
+img_buffer/

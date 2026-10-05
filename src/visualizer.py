@@ -1,4 +1,3 @@
-# src/visualizer.py
 from pathlib import Path
 import matplotlib.pyplot as plt
 from anomalib.utils.visualization import ImageResult

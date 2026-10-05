@@ -1,6 +1,8 @@
 import logging
 import os
 import warnings
+import json
+import numpy as np
 
 warnings.filterwarnings("ignore")
 logging.getLogger("lightning.pytorch").setLevel(logging.ERROR)
@@ -27,6 +29,7 @@ def run_folder_inference(
     threshold: float | None,
     save_vis: bool,
     output_dir: Path,
+    records: list[dict],
 ):
     valid_exts = ("*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG")
     images = []
@@ -54,9 +57,20 @@ def run_folder_inference(
             inf_time=inf_time,
         )
 
+        out_img_path = None
         if save_vis:
             out_img_path = output_dir / res_type / f"{img_p.stem}_res.png"
             save_prediction_image(predictions, out_img_path)
+            
+        records.append({
+            "filename": img_p.name,
+            "gt": "Anomalous" if expected_anomalous else "Normal",
+            "predict": "Anomalous" if pred_label else "Normal",
+            "result_type": res_type,  # "TP", "TN", "FP", "FN"
+            "score": round(pred_score, 4) if not np.isnan(pred_score) else None,
+            "photo_path": str(img_p.resolve()),
+            "vis_path": str(out_img_path.resolve()) if out_img_path else None,
+        })
 
 
 def main(
@@ -64,6 +78,7 @@ def main(
     model_path: Annotated[Path, arg(aliases=["-m"])],
     anomaly_threshold: Annotated[float | None, arg(aliases=["-t"])] = None,
     visualizations: Annotated[bool, arg(aliases=["-v"])] = True,
+    results: Annotated[bool, arg(aliases=["-r"])] = True,
     device: str = "CPU",
 ):
     """Evaluate model on labeled test data.
@@ -73,6 +88,7 @@ def main(
         model_path: Path to OpenVINO model.bin.
         anomaly_threshold: Override model default threshold. If None, uses model threshold.
         visualizations: Whether to save prediction visualizations (Original, Heatmap, Mask).
+        results: Whether to save results for report table.
         device: Inference device (e.g. 'CPU', 'GPU').
     """
     # check test dir structure
@@ -100,9 +116,10 @@ def main(
     print(f">>> Loading OpenVINO model: {model_path} (Device: {device})")
     inferencer = OpenVINOInferencer(path=model_path, device=device)
 
+    records = [] 
     metrics = EvaluationMetrics()
-    run_folder_inference(normal_dir, False, inferencer, metrics, anomaly_threshold, visualizations, run_dir)
-    run_folder_inference(anomalous_dir, True, inferencer, metrics, anomaly_threshold, visualizations, run_dir)
+    run_folder_inference(normal_dir, False, inferencer, metrics, anomaly_threshold, visualizations, run_dir, records)
+    run_folder_inference(anomalous_dir, True, inferencer, metrics, anomaly_threshold, visualizations, run_dir, records)
     metrics.print_report(model_path=model_path, output_dir=run_dir)
 
     # save metadata
@@ -115,6 +132,14 @@ def main(
         "visualizations_saved": visualizations,
     }
     metrics.save_metadata(run_dir / "metadata.json", meta)
+    
+    # save results
+    if results:
+        results_file = run_dir / "results.json"
+        with open(results_file, "w", encoding="utf-8") as f:
+            json.dump(records, f, indent=2, ensure_ascii=False)
+        print(f">>> Detailed results saved to: {results_file}")
+    
 
 
 if __name__ == "__main__":

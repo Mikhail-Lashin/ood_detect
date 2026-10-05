@@ -1,3 +1,5 @@
+Tools for outliers detection on RGB / depth data.
+
 # Environment Setup
 
 ### Clone repo and initialize submodules
