@@ -67,7 +67,11 @@ def main(dataset: Annotated[Path, arg(aliases=["-d"])],
 
     # model & engine
     model = Dinomaly()
-    engine = Engine(max_epochs=epochs)
+    engine = Engine(
+        max_epochs=epochs,
+        gradient_clip_val=1.0,
+        precision="bf16-mixed",
+    )
 
     # train
     if ckpt_path:
