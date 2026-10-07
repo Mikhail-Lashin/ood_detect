@@ -7,3 +7,4 @@ openvino_cache/
 scripts/vis_depth.py
 img_buffer/
 reports/
+runs/
