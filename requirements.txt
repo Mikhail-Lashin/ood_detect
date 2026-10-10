@@ -1,3 +1,7 @@
 tyro
 openpyxl
 ultralytics
+pyrealsense2
+onnxruntime
+opencv-python
+numpy
