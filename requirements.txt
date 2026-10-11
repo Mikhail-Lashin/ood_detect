@@ -5,3 +5,5 @@ pyrealsense2
 onnxruntime
 opencv-python
 numpy
+fastapi
+uvicorn
