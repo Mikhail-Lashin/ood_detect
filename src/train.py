@@ -71,6 +71,7 @@ def main(dataset: Annotated[Path, arg(aliases=["-d"])],
         max_epochs=epochs,
         gradient_clip_val=1.0,
         precision="bf16-mixed",
+        devices=1,
     )
 
     # train
