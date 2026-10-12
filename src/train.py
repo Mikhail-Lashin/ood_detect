@@ -50,8 +50,15 @@ def main(dataset: Annotated[Path, arg(aliases=["-d"])],
         print(f"Error: Dataset '{dataset}' must contain 'train/normal', 'test/normal' and 'test/anomalous'.", file=sys.stderr)
         sys.exit(1)
 
+    # descriptive dataset identifier for the experiment
+    if dataset.name in ("depth", "rgb"):
+        dataset_tag = f"{dataset.parent.name}_{dataset.name}"
+    else:
+        dataset_tag = dataset.name
+
+    experiment_name = f"Model_{model_name}_{dataset_tag}"
+    
     # datamodule
-    experiment_name = f"Model_{model_name}_{dataset.name}"
     datamodule = Folder(
         name=experiment_name,
         root=dataset,

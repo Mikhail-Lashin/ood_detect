@@ -134,12 +134,22 @@ def build_metadata_sheet(ws, meta: dict):
     ws.column_dimensions["E"].width = 35
 
 
-def build_results_sheet(ws, records: list[dict]):
+def build_results_sheet(
+    ws,
+    records: list[dict],
+    additional_lookup: dict[tuple[str, str], Path] | None = None,
+    fallback_lookup: dict[str, Path] | None = None,
+    additional_title: str = "Additional",
+):
     """Sheet 2 (results)"""
     ws.title = "Detailed Results"
     ws.views.sheetView[0].showGridLines = True
 
+    has_additional = additional_lookup is not None
     headers = ["#", "Filename", "Ground Truth", "Prediction", "Status", "Score", "Photo", "Heatmap"]
+    if has_additional:
+        headers.append(additional_title)
+
     for col_idx, h in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=col_idx, value=h)
         cell.font = HEADER_FONT
@@ -148,6 +158,7 @@ def build_results_sheet(ws, records: list[dict]):
     ws.row_dimensions[1].height = 28
 
     image_references = []
+    num_cols = len(headers)
 
     for row_idx, r in enumerate(records, start=2):
         ws.row_dimensions[row_idx].height = 75
@@ -189,15 +200,37 @@ def build_results_sheet(ws, records: list[dict]):
                 img_obj = OpenpyxlImage(heat_bio)
                 ws.add_image(img_obj, f"H{row_idx}")
 
-        for col_idx in range(1, 9):
+        # additional preview with class collision prevention
+        if has_additional:
+            filename = r.get("filename", "")
+            gt_label = str(r.get("gt", "")).lower()
+
+            # match by (class, filename) first
+            add_p = additional_lookup.get((gt_label, filename))
+            # fallback match by filename only
+            if not add_p and fallback_lookup:
+                add_p = fallback_lookup.get(filename)
+
+            if add_p and add_p.exists():
+                add_bio = create_thumbnail_bytes(add_p, crop_middle_third=False)
+                if add_bio:
+                    image_references.append(add_bio)
+                    img_obj = OpenpyxlImage(add_bio)
+                    ws.add_image(img_obj, f"I{row_idx}")
+
+        for col_idx in range(1, num_cols + 1):
             ws.cell(row=row_idx, column=col_idx).border = BORDER_THIN
 
     col_widths = {"A": 6, "B": 28, "C": 15, "D": 15, "E": 12, "F": 12, "G": 16, "H": 16}
+    if has_additional:
+        col_widths["I"] = 16
+
     for col, width in col_widths.items():
         ws.column_dimensions[col].width = width
 
     # filters
-    ws.auto_filter.ref = f"A1:H{len(records) + 1}"
+    last_col_letter = "I" if has_additional else "H"
+    ws.auto_filter.ref = f"A1:{last_col_letter}{len(records) + 1}"
     return image_references
 
 
@@ -206,6 +239,8 @@ def main(
     metadata: Annotated[Path | None, arg(aliases=["-m"])] = None,
     results: Annotated[Path | None, arg(aliases=["-r"])] = None,
     output: Annotated[Path | None, arg(aliases=["-o"])] = None,
+    additional_dir: Annotated[Path | None, arg(aliases=["-a"])] = None,
+    additional_title: str = "Additional",
 ):
     """Generate an Excel evaluation report with thumbnails and status color highlighting.
 
@@ -214,6 +249,8 @@ def main(
         metadata: Explicit path to metadata.json.
         results: Explicit path to results.json.
         output: Destination path for .xlsx report. If None, saves to reports/report_{timestamp}.xlsx.
+        additional_dir: Optional path to directory with companion images (e.g. RGB or depth).
+        additional_title: Header title for the companion image column (default: 'Additional').
     """
     # search for source files
     if eval_dir:
@@ -227,6 +264,27 @@ def main(
     if not results or not results.exists():
         print(f"Error: results.json not found ({results}). Provide -d or -r.", file=sys.stderr)
         sys.exit(1)
+
+    # index additional files if provided (keyed by (class, filename) to prevent collisions)
+    additional_lookup = None
+    fallback_lookup = None
+    if additional_dir:
+        if not additional_dir.is_dir():
+            print(f"Error: Additional folder '{additional_dir}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+
+        print(f">>> Indexing additional images from: {additional_dir}...")
+        additional_lookup = {}
+        fallback_lookup = {}
+
+        for p in additional_dir.rglob("*"):
+            if p.is_file():
+                # parent name corresponds to class ('normal' or 'anomalous')
+                cls_name = p.parent.name.lower()
+                additional_lookup[(cls_name, p.name)] = p
+                fallback_lookup[p.name] = p
+
+        print(f"    Indexed {len(additional_lookup)} class-paired entries.")
 
     # output file
     if output is None:
@@ -251,7 +309,13 @@ def main(
     build_metadata_sheet(ws_meta, meta_data)
 
     ws_results = wb.create_sheet()
-    _keep_alive_imgs = build_results_sheet(ws_results, records_data)
+    _keep_alive_imgs = build_results_sheet(
+        ws_results,
+        records_data,
+        additional_lookup=additional_lookup,
+        fallback_lookup=fallback_lookup,
+        additional_title=additional_title,
+    )
 
     print(f">>> Saving Excel workbook to: {output}...")
     wb.save(output)
