@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import asyncio
@@ -161,7 +162,7 @@ def filter_pointcloud_outliers(
             component.append(current)
             points_in_component += int(voxel_counts[current])
             vx, vy, vz = unique[current]
-            for dx, dy, dz in _NEIGNBOR_3D if '_NEIGNBOR_3D' in globals() else _NEIGHBOR_3D:
+            for dx, dy, dz in _NEIGHBOR_3D:
                 nxt = occupied.get((int(vx + dx), int(vy + dy), int(vz + dz)))
                 if nxt is not None and not visited[nxt]:
                     visited[nxt] = True
@@ -289,19 +290,18 @@ class RealSenseSource:
 
         self.pipeline = rs.pipeline()
         self.profile = self.pipeline.start(config)
-        
-        # apply high density preset on live hardware
-        if not self.bag_path:
+
+        if self.bag_path:
+            playback = self.profile.get_device().as_playback()
+            playback.set_real_time(False)
+        else:
+            # set high density preset for live hardware
             depth_sensor = self.profile.get_device().first_depth_sensor()
             if depth_sensor.supports(rs.option.visual_preset):
                 depth_sensor.set_option(
                     rs.option.visual_preset,
                     float(rs.rs400_visual_preset.high_density),
                 )
-
-        if self.bag_path:
-            playback = self.profile.get_device().as_playback()
-            playback.set_real_time(False)
 
         self.align = rs.align(rs.stream.color)
         self.depth_scale = float(self.profile.get_device().first_depth_sensor().get_depth_scale())
@@ -391,7 +391,7 @@ class ONNXModel:
 
 
 # ==============================================================================
-# INTERACTIVE CAPTURE SERVICE
+# INTERACTIVE CAPTURE SERVICE (SPLIT: NORMAL / ANOMALOUS)
 # ==============================================================================
 
 
@@ -414,24 +414,28 @@ class CaptureService:
         self.voxel_mm = voxel_mm
         self.debug = debug
 
-        # prepare destination folders
-        self.rgb_dir = output_dir / "rgb"
-        self.depth_dir = output_dir / "depth_raw"
-        self.mask_dir = output_dir / "mask"
-        self.rgb_seg_dir = output_dir / "rgb_seg"
-        self.depth_seg_dir = output_dir / "depth_seg"
-        self.vis_dir = output_dir / "vis"
-
-        for d in (self.rgb_dir, self.depth_dir, self.mask_dir, self.rgb_seg_dir, self.depth_seg_dir):
-            d.mkdir(parents=True, exist_ok=True)
-        if self.debug:
-            self.vis_dir.mkdir(parents=True, exist_ok=True)
+        # prepare directory tree for both classes
+        self.paths: dict[str, dict[str, Path]] = {}
+        for category in ("normal", "anomalous"):
+            cat_root = output_dir / category
+            self.paths[category] = {
+                "rgb": cat_root / "rgb",
+                "depth": cat_root / "depth_raw",
+                "mask": cat_root / "mask",
+                "rgb_seg": cat_root / "rgb_seg",
+                "depth_seg": cat_root / "depth_seg",
+                "vis": cat_root / "vis",
+            }
+            for folder in self.paths[category].values():
+                if folder.name == "vis" and not self.debug:
+                    continue
+                folder.mkdir(parents=True, exist_ok=True)
 
         self.lock = threading.Lock()
         self.latest_frame: RGBDFrame | None = None
         self.latest_mask: np.ndarray | None = None
         self.preview_jpeg: bytes = b""
-        self.saved_count: int = 0
+        self.counts = {"normal": 0, "anomalous": 0}
         self.running: bool = False
 
     def loop(self):
@@ -457,7 +461,7 @@ class CaptureService:
             p_seg = cv2.resize(p_seg, (w, h))
 
             p_depth = np.full_like(frame.color_bgr, 255)
-            depth_valid = (frame.depth_aligned_to_color > 0)
+            depth_valid = frame.depth_aligned_to_color > 0
             if mask is not None and np.any(mask):
                 depth_valid &= mask
 
@@ -478,14 +482,17 @@ class CaptureService:
                 self.latest_mask = mask
                 self.preview_jpeg = jpeg.tobytes()
 
-    def snapshot(self) -> dict[str, Any]:
-        """Trigger snapshot: runs full 3d cleanup, crops 512x512, saves all subfolders."""
+    def snapshot(self, category: str) -> dict[str, Any]:
+        """Trigger snapshot into specified category (normal / anomalous)."""
+        if category not in ("normal", "anomalous"):
+            return {"status": "error", "message": f"Unknown category: {category}"}
+
         with self.lock:
             frame = self.latest_frame
             mask = self.latest_mask
 
         if frame is None or mask is None or not np.any(mask):
-            return {"status": "error", "message": "No valid object in frame to capture"}
+            return {"status": "error", "message": "No valid object in frame"}
 
         clean_mask, _ = clean_mask_with_depth_filtering(
             bin_mask=mask,
@@ -499,7 +506,8 @@ class CaptureService:
         if len(xs) == 0:
             return {"status": "error", "message": "3D filtering eliminated all object points"}
 
-        stem = f"frame_{self.saved_count:05d}"
+        cat_paths = self.paths[category]
+        stem = f"frame_{self.counts[category]:05d}"
         bbox = (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
 
         # segmented rgb on white
@@ -521,18 +529,24 @@ class CaptureService:
         depth_square = crop_to_square(depth_white, bbox, target_size=self.target_size)
 
         # save artifacts
-        cv2.imwrite(str(self.rgb_dir / f"{stem}.png"), frame.color_bgr)
-        cv2.imwrite(str(self.depth_dir / f"{stem}.png"), frame.depth_aligned_to_color)
-        cv2.imwrite(str(self.mask_dir / f"{stem}.png"), (clean_mask.astype(np.uint8) * 255))
-        cv2.imwrite(str(self.rgb_seg_dir / f"{stem}.png"), rgb_square)
-        cv2.imwrite(str(self.depth_seg_dir / f"{stem}.png"), depth_square)
+        cv2.imwrite(str(cat_paths["rgb"] / f"{stem}.png"), frame.color_bgr)
+        cv2.imwrite(str(cat_paths["depth"] / f"{stem}.png"), frame.depth_aligned_to_color)
+        cv2.imwrite(str(cat_paths["mask"] / f"{stem}.png"), (clean_mask.astype(np.uint8) * 255))
+        cv2.imwrite(str(cat_paths["rgb_seg"] / f"{stem}.png"), rgb_square)
+        cv2.imwrite(str(cat_paths["depth_seg"] / f"{stem}.png"), depth_square)
 
         if self.debug:
             combined = np.hstack([rgb_square, depth_square])
-            cv2.imwrite(str(self.vis_dir / f"{stem}_vis.png"), combined)
+            cv2.imwrite(str(cat_paths["vis"] / f"{stem}_vis.png"), combined)
 
-        self.saved_count += 1
-        return {"status": "ok", "saved_count": self.saved_count, "stem": stem}
+        self.counts[category] += 1
+        return {
+            "status": "ok",
+            "category": category,
+            "normal_count": self.counts["normal"],
+            "anomalous_count": self.counts["anomalous"],
+            "stem": stem,
+        }
 
 
 # ==============================================================================
@@ -564,13 +578,19 @@ HTML_TEMPLATE = """
             margin-bottom: 12px;
         }
         .title { font-size: 18px; font-weight: 600; }
-        .counter {
-            font-size: 16px;
-            background: #252526;
+        .counters {
+            display: flex;
+            gap: 10px;
+        }
+        .counter-badge {
+            font-size: 14px;
             padding: 6px 14px;
             border-radius: 4px;
             border: 1px solid #3c3c3c;
+            background: #252526;
         }
+        .counter-badge.normal { border-left: 4px solid #388a34; }
+        .counter-badge.anomalous { border-left: 4px solid #c93838; }
         .stream-container {
             border: 1px solid #3c3c3c;
             border-radius: 6px;
@@ -586,27 +606,31 @@ HTML_TEMPLATE = """
             color: #858585;
             margin-top: 6px;
         }
-        .controls { margin-top: 18px; display: flex; gap: 12px; }
+        .controls { margin-top: 18px; display: flex; gap: 16px; }
         button {
-            background: #0e639c;
-            color: #fff;
             border: none;
-            padding: 10px 28px;
+            padding: 12px 28px;
             font-size: 15px;
             font-weight: 600;
             border-radius: 4px;
             cursor: pointer;
-            transition: background 0.15s;
+            transition: opacity 0.15s, transform 0.1s;
         }
-        button:hover { background: #1177bb; }
         button:active { transform: scale(0.98); }
-        .hint { color: #6e6e6e; font-size: 12px; margin-top: 8px; }
+        .btn-normal { background: #388a34; color: #fff; }
+        .btn-normal:hover { background: #43a047; }
+        .btn-anomalous { background: #c93838; color: #fff; }
+        .btn-anomalous:hover { background: #e53935; }
+        .hint { color: #6e6e6e; font-size: 12px; margin-top: 10px; }
     </style>
 </head>
 <body>
     <div class="header">
-        <div class="title">Live RGB-D Camera Preview</div>
-        <div class="counter" id="counter">Saved: 0 frames</div>
+        <div class="title">Live RGB-D Anomaly Capture</div>
+        <div class="counters">
+            <div class="counter-badge normal" id="cnt-norm">Normal: 0</div>
+            <div class="counter-badge anomalous" id="cnt-anom">Anomalous: 0</div>
+        </div>
     </div>
     <div class="stream-container">
         <img src="/stream" alt="Live Stream" />
@@ -617,33 +641,34 @@ HTML_TEMPLATE = """
         <span>Depth Map</span>
     </div>
     <div class="controls">
-        <button id="snap-btn" onclick="captureSnapshot()">SNAP PHOTO [SPACE]</button>
+        <button class="btn-normal" onclick="captureSnapshot('normal')">SNAP NORMAL [N / SPACE]</button>
+        <button class="btn-anomalous" onclick="captureSnapshot('anomalous')">SNAP ANOMALOUS [A]</button>
     </div>
-    <div class="hint">Press <b>SPACE</b> or click button to capture and save training crop.</div>
+    <div class="hint">Use <b>N / Space</b> to capture normal sample, or <b>A</b> for anomaly.</div>
 
     <script>
-        async function captureSnapshot() {
-            const btn = document.getElementById('snap-btn');
-            btn.style.background = '#388a34';
+        async function captureSnapshot(category) {
             try {
-                const res = await fetch('/snapshot', { method: 'POST' });
+                const res = await fetch(`/snapshot/${category}`, { method: 'POST' });
                 const data = await res.json();
                 if (data.status === 'ok') {
-                    document.getElementById('counter').innerText = `Saved: ${data.saved_count} frames`;
+                    document.getElementById('cnt-norm').innerText = `Normal: ${data.normal_count}`;
+                    document.getElementById('cnt-anom').innerText = `Anomalous: ${data.anomalous_count}`;
                 } else {
                     alert(data.message || 'Capture failed');
                 }
             } catch (err) {
                 console.error(err);
-            } finally {
-                setTimeout(() => { btn.style.background = '#0e639c'; }, 200);
             }
         }
 
         window.addEventListener('keydown', (e) => {
-            if (e.code === 'Space') {
+            if (e.code === 'KeyN' || e.code === 'Space') {
                 e.preventDefault();
-                captureSnapshot();
+                captureSnapshot('normal');
+            } else if (e.code === 'KeyA') {
+                e.preventDefault();
+                captureSnapshot('anomalous');
             }
         });
     </script>
@@ -737,13 +762,13 @@ def main(
             media_type="multipart/x-mixed-replace; boundary=frame",
         )
 
-    @app.post("/snapshot")
-    def snapshot():
-        return JSONResponse(service.snapshot())
+    @app.post("/snapshot/{category}")
+    def snapshot(category: str):
+        return JSONResponse(service.snapshot(category))
 
     print("\n" + "=" * 60)
-    print(f">>> Interactive capture is ready!")
-    print(f">>> Open in VS Code: Ctrl+Shift+P -> 'Simple Browser: Show'")
+    print(">>> Interactive capture is ready!")
+    print(">>> Open in VS Code: Ctrl+Shift+P -> 'Simple Browser: Show'")
     print(f">>> Address: http://127.0.0.1:{port}")
     print("=" * 60 + "\n")
 

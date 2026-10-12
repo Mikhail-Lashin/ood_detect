@@ -8,3 +8,4 @@ scripts/vis_depth.py
 img_buffer/
 reports/
 runs/
+new_data*/
